@@ -52,6 +52,12 @@ replace or alter the profile format. Configure `Sync Repository`, then run
 `confexport:sync-setup`. The remote can be hosted by GitHub, GitLab, Forgejo, or
 any other Git server.
 
+When `Sync Repository` is empty, confexport reuses the `origin` of its local
+clone when available. Otherwise, the repository prompt suggests up to eight
+recently used remotes, so their URLs do not need to be copied again. This
+plugin-specific history is stored in `.confexport/repositories.json` under the
+Lite XL user directory; URLs containing embedded passwords are never retained.
+
 Confexport calls the local `git` executable directly without shell scripts. It
 never stores credentials: HTTPS credentials are handled by Git's credential
 manager, and SSH credentials by the user's SSH agent. Repository URLs embedding

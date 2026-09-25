@@ -16,6 +16,10 @@ local function trim(value)
   return (value or ""):gsub("^%s+", ""):gsub("%s+$", "")
 end
 
+local function repository_contains_credentials(repository)
+  return repository:match("://[^/%s]+:[^@/%s]+@") ~= nil
+end
+
 local function ensure_dir(path)
   local info = system.get_file_info(path)
   if info then
@@ -56,7 +60,7 @@ local function options_from(values)
   local relative, err = safe_profile_path(values.sync_profile or "lite-xl-profile")
   if not relative then return nil, err end
   local repository = trim(values.sync_repository)
-  if repository:match("://[^/%s]+:[^@/%s]+@") then
+  if repository_contains_credentials(repository) then
     return nil, "repository URLs containing credentials are refused; use a Git credential manager or SSH agent"
   end
   local directory = trim(values.sync_directory)
@@ -98,6 +102,18 @@ end
 local function repo_exists(root)
   local info = system.get_file_info(join(root, ".git"))
   return info and (info.type == "dir" or info.type == "file")
+end
+
+function sync.local_repository(values, run)
+  local options, err = options_from(values)
+  if not options then return nil, err end
+  if not repo_exists(options.directory) then return nil end
+  local repository
+  repository, err = git(run, options.directory, { "remote", "get-url", "origin" })
+  if not repository then return nil, err end
+  repository = trim(repository)
+  if repository == "" or repository_contains_credentials(repository) then return nil end
+  return repository
 end
 
 local function directory_is_empty(path)

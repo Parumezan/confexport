@@ -11,6 +11,11 @@ local sync = require "plugins.confexport.sync"
 local confexport = {}
 confexport.VERSION = profile.VERSION
 
+local RECENT_REPOSITORIES_LIMIT = 8
+local RECENT_REPOSITORIES_PATH = table.concat({
+  USERDIR, ".confexport", "repositories.json"
+}, PATHSEP)
+
 config.plugins.confexport = common.merge({
   export_directory = USERDIR .. PATHSEP .. "exports",
   include_bootstrap = true,
@@ -197,6 +202,65 @@ local function decode_lpm(output, operation)
     return nil, string.format("invalid LPM response during %s: %s", operation, decoded)
   end
   return decoded
+end
+
+local function trim(value)
+  return (value or ""):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function load_recent_repositories()
+  local fp = io.open(RECENT_REPOSITORIES_PATH, "rb")
+  if not fp then return {} end
+  local data = fp:read("*a")
+  fp:close()
+  local ok, decoded = pcall(json.decode, data)
+  if not ok or type(decoded) ~= "table" then return {} end
+
+  local values = type(decoded.repositories) == "table" and decoded.repositories or decoded
+  local repositories, seen = {}, {}
+  for _, value in ipairs(values) do
+    local repository = type(value) == "string" and trim(value) or ""
+    if repository ~= "" and not seen[repository]
+      and not repository:match("://[^/%s]+:[^@/%s]+@")
+    then
+      repositories[#repositories + 1] = repository
+      seen[repository] = true
+      if #repositories == RECENT_REPOSITORIES_LIMIT then break end
+    end
+  end
+  return repositories
+end
+
+local function save_recent_repositories(repositories)
+  local ok, err, failed_path = common.mkdirp(common.dirname(RECENT_REPOSITORIES_PATH))
+  if not ok then return nil, err or ("cannot create " .. tostring(failed_path)) end
+  local fp, open_error = io.open(RECENT_REPOSITORIES_PATH, "wb")
+  if not fp then return nil, open_error end
+  local wrote, write_error = fp:write(json.encode({ repositories = repositories }), "\n")
+  fp:close()
+  if not wrote then return nil, write_error end
+  return true
+end
+
+local function remember_repository(repository)
+  repository = trim(repository)
+  if repository == "" or repository:match("://[^/%s]+:[^@/%s]+@") then return end
+  local repositories = { repository }
+  for _, previous in ipairs(load_recent_repositories()) do
+    if previous ~= repository and #repositories < RECENT_REPOSITORIES_LIMIT then
+      repositories[#repositories + 1] = previous
+    end
+  end
+  local ok, err = save_recent_repositories(repositories)
+  if not ok then
+    core.warn("Confexport: cannot save recent Git repositories: %s", tostring(err))
+  end
+end
+
+local function repository_suggestions(text)
+  local repositories = load_recent_repositories()
+  if trim(text) == "" then return repositories end
+  return common.fuzzy_match(repositories, text)
 end
 
 local function load_inventory()
@@ -480,12 +544,13 @@ local function ask_repository(submit)
   core.command_view:enter("Git Repository URL", {
     text = config.plugins.confexport.sync_repository or "",
     select_text = true,
+    suggest = repository_suggestions,
     submit = function(text)
-      text = (text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+      text = trim(text)
       if text == "" then show_error("no synchronization repository was provided") return end
       config.plugins.confexport.sync_repository = text
       core.log(
-        "Confexport: repository set for this session. Save Sync Repository in Lite XL Settings to persist it."
+        "Confexport: repository selected for this session. It will be added to recent repositories after a successful Git operation."
       )
       submit()
     end
@@ -496,7 +561,17 @@ local function with_repository(callback)
   if type(config.plugins.confexport.sync_repository) ~= "string"
     or config.plugins.confexport.sync_repository:match("^%s*$")
   then
-    ask_repository(callback)
+    core.add_thread(function()
+      local repository = sync.local_repository(config.plugins.confexport, run_process)
+      if repository then
+        config.plugins.confexport.sync_repository = repository
+        remember_repository(repository)
+        core.log("Confexport: reusing the local Git origin %s.", repository)
+        callback()
+      else
+        ask_repository(callback)
+      end
+    end)
   else
     callback()
   end
@@ -508,6 +583,7 @@ function confexport.sync_setup()
       core.log("Confexport: setting up Git synchronization...")
       local result, err = sync.setup(config.plugins.confexport, run_process)
       if not result then show_error(err) return end
+      remember_repository(result.options.repository)
       core.log(
         "Confexport: synchronization repository ready at %s (%s).",
         result.options.directory,
@@ -625,6 +701,7 @@ local function confirm_sync_push(transaction)
         core.add_thread(function()
           local result, err = sync.commit_push(transaction, run_process)
           if not result then show_error(err) return end
+          remember_repository(transaction.options.repository)
           if result.unchanged and not result.pushed then
             core.log("Confexport: synchronized profile is already up to date.")
           elseif result.unchanged then
